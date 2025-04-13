@@ -8,6 +8,7 @@ import asyncio
 from dotenv import load_dotenv
 import logging
 
+# Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -15,36 +16,53 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# Validate environment variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GITHUB_SECRET = os.getenv("GITHUB_SECRET")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")  # Optional for security
 
 if not all([TELEGRAM_TOKEN, GITHUB_SECRET, TELEGRAM_CHAT_ID]):
     logger.error("Missing required environment variables: TELEGRAM_TOKEN, GITHUB_SECRET, or TELEGRAM_CHAT_ID")
     raise EnvironmentError("Environment variables not set")
 
+if not GITHUB_SECRET:
+    logger.error("GITHUB_SECRET must be a non-empty string")
+    raise ValueError("Invalid GITHUB_SECRET")
+
 GITHUB_SECRET = GITHUB_SECRET.encode()
 
-
+# Initialize Telegram bot application
 async def init_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Add command handler
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("GitHub notifications bot is active.")
 
     application.add_handler(CommandHandler("start", start))
-
     await application.initialize()
     return application
 
+# Run bot initialization
 loop = asyncio.get_event_loop()
 application = loop.run_until_complete(init_bot())
 
+# Helper to run async tasks synchronously
+def run_async(coro):
+    """
+    Run an async coroutine in a thread-safe way using the existing event loop.
+    """
+    return loop.run_until_complete(coro)
 
 @app.route("/telegram-webhook", methods=["POST"])
-async def telegram_webhook():
+def telegram_webhook():
     try:
+        # Verify Telegram webhook secret (if provided)
+        if TELEGRAM_WEBHOOK_SECRET:
+            auth_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if auth_header != TELEGRAM_WEBHOOK_SECRET:
+                logger.warning("Invalid Telegram webhook secret token")
+                return Response("Invalid secret token", status=403)
 
         update = request.get_json(force=True)
         if not update:
@@ -52,16 +70,15 @@ async def telegram_webhook():
             return Response("Invalid payload", status=400)
 
         # Process update asynchronously
-        await application.process_update(Update.de_json(update, application.bot))
+        run_async(application.process_update(Update.de_json(update, application.bot)))
         return Response("OK", status=200)
 
     except Exception as e:
         logger.error(f"Error processing Telegram webhook: {e}")
         return Response(f"Error: {e}", status=500)
 
-
 @app.route("/github-webhook", methods=["POST"])
-async def github_webhook():
+def github_webhook():
     try:
         # Verify GitHub signature
         signature = request.headers.get("X-Hub-Signature-256")
@@ -90,8 +107,7 @@ async def github_webhook():
             pusher = data["pusher"]["name"]
             commit_msg = data.get("head_commit", {}).get("message", "No commit message")
             message = f"Repo: {repo}\nPusher: {pusher}\nCommit: {commit_msg}"
-
-            await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+            run_async(application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message))
             logger.info(f"Sent Telegram message for push to {repo}")
 
         return Response("OK", status=200)
@@ -100,16 +116,12 @@ async def github_webhook():
         logger.error(f"Error processing GitHub webhook: {e}")
         return Response(f"Error: {e}", status=500)
 
-
 if __name__ == "__main__":
     try:
-        # Run Flask with a production WSGI server (e.g., Waitress) in production
-        logger.info("Starting Flask development server on port 5000")
+        logger.info("Starting Flask server on port 5000")
         from waitress import serve
-
         serve(app, host="0.0.0.0", port=5000)
     except KeyboardInterrupt:
         logger.info("Shutting down server")
     finally:
-        # Clean up bot resources
         loop.run_until_complete(application.shutdown())
