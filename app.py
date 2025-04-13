@@ -111,7 +111,6 @@ def github_webhook():
                 len(data.get("head_commit", {}).get("modified", [])) +
                 len(data.get("head_commit", {}).get("removed", []))
             )
-
             message = (
                 f"📦 *Repo*: {repo} ({repo_url})\n"
                 f"🌳 *Branch*: {branch}\n"
